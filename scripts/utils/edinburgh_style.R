@@ -7,8 +7,8 @@ library(gt)
 library(dplyr)
 library(rlang)
 
-source("RScripts/utils/name_cleaning.R")
-source("RScripts/utils/model_utils.R")
+source("scripts/utils/name_cleaning.R")
+source("scripts/utils/model_utils.R")
 
 # ---- Colour palette ----
 EDINBURGH_DARK   <- "#041E42"

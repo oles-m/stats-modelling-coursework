@@ -7,28 +7,283 @@ output: pdf_document
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
-```
 
-
-```{r libraries}
 library(tidyverse)
 library(here)
+library(dagitty)
 
+library(gtsummary)
+# library(car)
+
+source(here("scripts/utils/edinburgh_style.R"))
+set_edinburgh_theme()
+
+OUTPUT_DIR <- "outputs"
+if (!dir.exists(OUTPUT_DIR)) dir.create(OUTPUT_DIR, recursive = TRUE)
 
 ```
 
-```{r data}
+## Part I
 
-data <- read_csv(here("data/respiratory_synthetic_assignment.csv"))
+Carry out a simple exploratory investigation of baseline variables (using appropriate numerical summaries and graphical methods). You should explain the implications of your findings with respect to causal concepts and downstream modelling assumptions.
 
-data %>% str()
-data %>% glimpse()
+```{r}
+raw_data <- 
+  read_csv(here("data/respiratory_synthetic_assignment.csv"))
 
-summary(lm(symptom_change_6m ~ new_therapy, data = data))
+raw_data %>% head(10)
+raw_data %>% str()
+raw_data %>% glimpse()
+raw_data %>% summary()
 
-ggplot(aes(x = new_therapy, y = symptom_change_6m), data = data) +
+```
+
+The dataset contains 620 observations and 17 variables. The character variables that might be of interest, including *sex*, *smoking_status*, *deprivation_quintile*, and *new_therapy*, would be more convenient to use (and efficient to store) as factors. 
+
+The binary variables *severe_exacerbation_12m* and *followup_event* could work as the boolean data type. However, I prefer factors here as well, since factors can be assigned meaningful labels. The common convention for binary data is to code the presence of the outcome event (in this case, severe exacerbation at month 12 and hospital admission/death) as 1 and the absence of such as 0. Both binary variables conform to the convention. 
+
+```{r }
+
+resp_data <- raw_data %>%
+  mutate(
+    across(where(is.character), as.factor),
+    treatment_group = new_therapy,
+    severe_exacerbation_12m =
+      factor(
+        severe_exacerbation_12m,
+        levels = c(0, 1),
+        labels = c("No", "Yes")
+      ),
+    followup_event = factor(
+      followup_event,
+      levels = c(0, 1),
+      labels = c("No", "Yes")
+    )
+  )
+
+```
+
+
+A quick inspection with the *summary()* function shows no issues with missing data. 
+
+We can also see considerable variability in age (median = 58, range = 19 to 88) and baseline clinical characteristics of the participants, particularly symptom score (median = 24.9, range = 4.3 to 40.0) and FEV1 (median = 63.1, range = 25.0 to 102.6) Some individuals also had substantially more comorbidities (median = 1, range = 0 to 5) or experienced exacerbations within the previous 12 months (median = 1, range = 0 to 7) much more frequently than others. 
+
+```{r summary}
+
+resp_data %>% summary()
+
+```
+
+All of these factors are worth accounting for in later modelling as, for instance, younger age may turn out to be linked to more favorable outcomes and so may better health condition at baseline. 
+
+```{r baseline-characteristics-by-group}
+
+baseline_stats_by_group <- resp_data %>%
+  group_by(treatment_group) %>%
+  summarise(
+    mean_age = mean(age),
+    sd_age = sd(age),
+    mean_symptom_score = mean(baseline_symptom_score, na.rm = TRUE),
+    sd_symptom_score = sd(baseline_symptom_score, na.rm = TRUE),
+    mean_prior_exacerbations = mean(prior_exacerbations_12m, na.rm = TRUE),
+    sd_prior_exacerbations = sd(prior_exacerbations_12m, na.rm = TRUE),
+    mean_comorbidities = mean(comorbidity_count, na.rm = TRUE),
+    sd_comorbidities = sd(comorbidity_count),
+    `Mean FEV1 (%)` = mean(baseline_fev1_pct),
+    `SD FEV1 (%)` = sd(baseline_fev1_pct)
+  )
+
+baseline_table_1 <- table_edinburgh(
+  baseline_stats_by_group %>% 
+    select(-contains(c("comorb", "exacerb"))),
+  title = "Age and Baseline Clinical Characteristics by Treatment Group"
+)
+
+baseline_table_1
+
+ 
+```
+
+Age, mean symptom score, and FEV1 at baseline seem comparable between groups.
+
+However, the mean comorbidity count and mean exacerbation count within 12 months prior to the study were substantially higher among in the new therapy group. 
+
+
+```{r comorbidities-and-exacerbations}
+
+baseline_table_2 <- table_edinburgh(
+  baseline_stats_by_group %>% 
+    select(contains(c("treatment", "comorb", "exacerb"))),
+  title = "Comorbidities and Prior Exacerbations by Treatment Group"
+)
+
+baseline_table_2
+```
+
+The differences were formally assessed with the Welch's two-sample t-test. The test produced a p-value \< 0.001 for both mean comorbidity count and mean prior exacerbation count, rejecting the null hypotheses of no difference between the group means. These differences are important to adjust for in further modelling, since more favorable health conditions at baseline could be linked to superior treatment outcomes. 
+
+```{r}
+
+t.test(comorbidity_count ~ treatment_group, data = resp_data)
+
+```
+
+```{r}
+t.test(prior_exacerbations_12m ~ treatment_group, data = resp_data)
+```
+
+
+The new therapy group had a somewhat larger percentage of females than males (56% vs. 44%), while in the standard care group the gender distribution was more even (49% females vs. 51% males). The new therapy group also had a higher percentage of current smokers than the usual care group (24% vs. 19%). Although the Chi-square test of independence yielded no evidence of relationship between group assignment and gender or group assignment and smoking status, both of these variables may still be worth including in the models as potential confounders.
+
+```{r}
+
+table_labels <- 
+  list(
+    treatment_group = "Treatment Group",
+    sex = "Sex",
+    age = "Age",
+    smoking_status = "Smoking Status",
+    deprivation_quintile = "Deprivation Quintile"
+    )
+
+```
+
+
+```{r}
+
+resp_data %>% 
+  tbl_cross(
+    row = treatment_group,
+    col = sex,
+    percent = "row",
+    label = table_labels
+  ) %>% 
+  bold_labels()
+
+```
+
+```{r}
+
+resp_data %>% 
+  tbl_cross(
+    row = treatment_group,
+    col = smoking_status,
+    percent = "row",
+    label = table_labels
+  ) %>% 
+  bold_labels()
+
+```
+
+
+The Chi-square test yielded a test statistic of `r round(chisq$statistic, 2)` (df = `r chisq$parameter`) and a p-value of `r round(chisq$p.value, 2)`.
+```{r}
+chisq_sex <- chisq.test(
+  as.data.frame.matrix(
+    table(resp_data$treatment_group, resp_data$sex))
+  )
+
+as.tibble(
+  
+)
+
+
+The Chi-square test yielded a test statistic of `r round(chisq$statistic, 2)` (df = `r chisq$parameter`) and a p-value of `r round(chisq$p.value, 2)`.
+
+model_summary_edinburgh(chisq_sex, "chisq_sex.png", folder = OUTPUT_DIR)
+
+summary(chisq_sex.png)
+
+
+model_summary_edinburgh(
+  model_adjusted,
+  filename = "casestudy1_adjusted.png",
+  folder = OUTPUT_DIR
+)
+```
+
+```{r}
+chisq.test(
+  as.data.frame.matrix(
+    table(resp_data$treatment_group, resp_data$smoking_status))
+  )
+```
+
+
+The groups were comparable by socio-economic status, with similar distribution of the subject across deprivation quintiles.
+
+```{r}
+resp_data %>% 
+  tbl_cross(
+    row = treatment_group,
+    col = deprivation_quintile,
+    percent = "row",
+    label = table_labels
+  ) %>% 
+  bold_labels()
+
+```
+
+
+
+## Part II
+
+Construct a directed-acyclic-graph and use an appropriate statistical model to investigate whether ‘new_therapy’ is associated with greater improvement in symptoms at 6 months. You should define your outcome clearly and justify any set of adjustment variables you use. You should also ensure you report and interpret the estimated effect, commenting on any model assumptions and diagnostic checks you consider relevant.
+
+```{r}
+
+resp_data %>% 
+  ggplot(aes(x = treatment_group, y = symptom_change_6m)) +
   geom_boxplot()
 
+lm <- lm(symptom_change_6m ~ baseline_symptom_score, data = resp_data)
+
+residuals <- lm$residuals
+fitted    <- lm$fitted.values
+
+
+ggplot(
+  data = tibble(residuals = lm$residuals, 
+                fitted    = lm$fitted.values),
+  aes(x = fitted, y = residuals)
+  ) +
+  geom_point_edinburgh() + 
+  geom_hline(yintercept = 0, linetype="dashed", colour=EDINBURGH_ACCENT) +
+  labs(title = "Residuals vs Fitted Values")
+
+resid_plot <- ggplot(tibble(fitted = fitted_adj, residuals = residuals_adj), aes(x=fitted, y=residuals)) +
+  geom_point_edinburgh() + 
+  geom_hline(yintercept = 0, linetype="dashed", colour=EDINBURGH_ACCENT) +
+  labs(title = "Residuals vs Fitted Values",
+       x = "Fitted values",
+       y = "Residuals")
+
+qqplot(residuals)
+
+qq_plot <- qq_plot_edinburgh(residuals)
+qq_plot <- apply_edinburgh_labels(qq_plot)
+qq_plot
+
+resp_data %>% 
+  group_by(treatment_group) %>% 
+  summarise(
+    subjects = n(),
+    mean_symptom_change = mean(symptom_change_6m),
+    sd_symptom_change = sd(symptom_change_6m)
+  )
+
+
+resp_data %>% view()
+
+
 ```
 
+
+## Part III
+
+Is there evidence that ‘new_therapy’ is associated with fewer GP-treated exacerbations over 12 months? Construct an appropriate statistical model and report an interpretable rate. Ensure you assess whether your chosen model is appropriate, addressing any concerns regarding overdispersion.
+
+## Part IV
+
+Explore potential evidence for an association between ‘new_therapy’ and a longer time to hospital admission or death. In doing so ensure you define clearly the survival outcome and event variables. Comment on censoring and the proportional-hazards assumption when modelling. Additionally, you should consider and discuss whether there are potential interactions between the treatment and any other explanatory variables but are not expected to fit an interaction model.
 
